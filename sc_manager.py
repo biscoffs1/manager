@@ -207,18 +207,29 @@ def run_command(cmd, timeout=180, retries=1):
                     p = Path(cmd[1])
                     if p.is_file(): p.unlink()
                 else:
-                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, text=True)
+                    res = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=timeout
+                    )
                     if res.returncode != 0:
                         logger.error(f"Command failed (code {res.returncode}): {shlex.join(cmd)}")
-                        if res.stderr:
-                            logger.error(f"Error output: {res.stderr.strip()}")
+                        logger.error(res.stderr[-2000:])
                         return False
             else:
-                res = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, text=True)
+                res = subprocess.run(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout
+                )
                 if res.returncode != 0:
                     logger.error(f"Shell command failed (code {res.returncode}): {cmd}")
-                    if res.stderr:
-                        logger.error(f"Error output: {res.stderr.strip()}")
+                    logger.error(res.stderr[-2000:])
                     return False
             return True
         except Exception as e:
@@ -307,7 +318,7 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
     """
     FFmpeg command optimized for speed and reliability:
     - Input-related flags (-noautorotate, -ss, -err_detect, etc.) MUST be BEFORE -i
-    - yuvj420p for MJPEG range success
+    - yuv420p via filter for compatibility
     """
     return [
         "ffmpeg", "-y", "-threads", "1", 
@@ -319,33 +330,34 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
         "-ss", str(timestamp_str),
         "-i", os.path.abspath(video_path),
         "-map", "0:v:0", "-an", "-vframes", "1", 
-        "-vf", THUMB_FILTER,
-        "-pix_fmt", "yuvj420p", "-map_metadata", "-1",
+        "-vf", f"{THUMB_FILTER},format=yuv420p",
+        "-map_metadata", "-1",
         "-strict", "unofficial", os.path.abspath(thumb_path)
     ]
 
 def get_edit_thumbnail_timestamp(duration, fps, index):
-    if duration <= 0: duration = 10.0
-    if fps <= 0: fps = 25.0
+    if duration <= 0:
+        duration = 10.0
 
-    # User request: 2 frames in from start, 2 frames from end.
-    margin = 2.0 / fps
-    if margin * 2 >= duration:
-        # Fallback for very short videos: 5% margin
-        margin = duration * 0.05
+    if fps <= 0:
+        fps = 25.0
 
-    s = margin
-    e = duration - margin
+    frame_time = 1.0 / fps
 
-    # 10 frames means index 0 to 9.
-    if index == 0:
-        ts = s
-    elif index == 9:
-        ts = e
-    else:
-        ts = s + (index * (e - s) / 9.0)
+    # 2 frames into video
+    start = frame_time * 2
 
-    return f"{max(0.0, min(ts, duration - 0.001)):.4f}"
+    # 2 frames before end
+    end = duration - (frame_time * 2)
+
+    # Safety clamp for very short videos
+    if end <= start:
+        start = 0.0
+        end = max(0.05, duration - frame_time)
+
+    ts = start + ((end - start) * (index / 9.0))
+
+    return f"{max(start, min(ts, end)):.4f}"
 
 def is_valid_thumbnail(video_mtime, thumb_path):
     tp = Path(thumb_path)
@@ -532,13 +544,27 @@ def check_thumbnails():
             rp = rt_dir / f"{vp.stem}.jpg"
             if not is_valid_thumbnail(vm, rp): issues["MissingRegular"].append(vp)
             
-            missing_edit_indices = []
+            valid_indices = set()
+
             if et_dir.exists():
-                for i in range(1, 11):
-                    ep = et_dir / f"{vp.stem}_{i}.jpg"
-                    if not is_valid_thumbnail(vm, ep): missing_edit_indices.append(i)
-            else:
-                missing_edit_indices = list(range(1, 11))
+                for thumb in et_dir.glob(f"{vp.stem}_*.jpg"):
+                    m = re.match(
+                        rf'^{re.escape(vp.stem)}_(\d+)\.jpg$',
+                        thumb.name
+                    )
+
+                    if not m:
+                        continue
+
+                    idx = int(m.group(1))
+
+                    if 1 <= idx <= 10 and is_valid_thumbnail(vm, thumb):
+                        valid_indices.add(idx)
+
+            missing_edit_indices = [
+                i for i in range(1, 11)
+                if i not in valid_indices
+            ]
             
             if missing_edit_indices: issues["MissingEdit"].append((vp, missing_edit_indices))
 
