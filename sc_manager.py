@@ -207,16 +207,35 @@ def run_command(cmd, timeout=180, retries=1):
                     p = Path(cmd[1])
                     if p.is_file(): p.unlink()
                 else:
-                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+                    res = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        timeout=timeout
+                    )
                     if res.returncode != 0:
-                        logger.error(f"Command failed (code {res.returncode}): {' '.join(cmd)}")
+                        logger.error(f"Command failed (code {res.returncode}): {shlex.join(cmd)}")
+                        err_out = res.stderr.decode('utf-8', errors='replace')
+                        logger.error(err_out[-2000:])
                         return False
             else:
-                subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+                res = subprocess.run(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout
+                )
+                if res.returncode != 0:
+                    logger.error(f"Shell command failed (code {res.returncode}): {cmd}")
+                    err_out = res.stderr.decode('utf-8', errors='replace')
+                    logger.error(err_out[-2000:])
+                    return False
             return True
         except Exception as e:
             if attempt == retries:
-                logger.error(f"Command failed after {retries} retries: {cmd}. Error: {e}")
+                cmd_str = shlex.join(cmd) if isinstance(cmd, list) else str(cmd)
+                logger.error(f"Command failed after {retries} retries: {cmd_str}. Error: {e}")
                 return False
     return False
 
@@ -252,8 +271,8 @@ def get_video_metadata(video_path, use_cache=None):
             "-show_entries", "format=duration:stream=avg_frame_rate",
             "-of", "json", str(video_path)
         ]
-        res = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=10)
-        data = json.loads(res)
+        res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10)
+        data = json.loads(res.decode('utf-8', errors='replace'))
         if 'streams' in data and data['streams']:
             fps_str = data['streams'][0].get('avg_frame_rate', '25/1')
             if "/" in fps_str:
@@ -298,32 +317,50 @@ def get_md5_parallel(paths):
 def build_thumbnail_command(video_path, thumb_path, timestamp_str):
     """
     FFmpeg command optimized for speed and reliability:
-    - -noautorotate BEFORE -i
-    - -ss BEFORE -i for fast seeking
-    - yuvj420p for MJPEG range success
+    - Input-related flags (-noautorotate, -ss, -err_detect, etc.) MUST be BEFORE -i
+    - setparams filter used to normalize colorspace for FFmpeg 7+ compatibility
+    - yuvj420p for MJPEG compatibility
     """
+    # Normalize colorspace metadata to avoid "Invalid color space" errors in FFmpeg 7+
+    csp_fix = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+    full_filter = f"{csp_fix},{THUMB_FILTER}"
+
     return [
         "ffmpeg", "-y", "-threads", "1", 
         "-noautorotate",
+        "-err_detect", "ignore_err",
+        "-fflags", "+genpts+igndts+discardcorrupt",
         "-ss", str(timestamp_str),
-        "-i", str(video_path), 
-        "-err_detect", "ignore_err", "-fflags", "+genpts+igndts+discardcorrupt",
-        "-analyzeduration", "100M", "-probesize", "100M",
+        "-i", os.path.abspath(video_path),
         "-map", "0:v:0", "-an", "-vframes", "1", 
-        "-vf", THUMB_FILTER,
+        "-vf", full_filter,
         "-pix_fmt", "yuvj420p", "-map_metadata", "-1",
-        "-strict", "unofficial", str(thumb_path)
+        os.path.abspath(thumb_path)
     ]
 
 def get_edit_thumbnail_timestamp(duration, fps, index):
-    if duration <= 0: duration = 10.0
-    margin = max(0.5, duration * 0.05)
-    if margin * 2 >= duration:
-        s, e = 0, duration * 0.95
-    else:
-        s, e = margin, duration - margin
-    ts = s + (index * (e - s) / 9)
-    return f"{max(0.0, min(ts, duration - 0.05)):.4f}"
+    if duration <= 0:
+        duration = 10.0
+
+    if fps <= 0:
+        fps = 25.0
+
+    frame_time = 1.0 / fps
+
+    # 2 frames into video
+    start = frame_time * 2
+
+    # 2 frames before end
+    end = duration - (frame_time * 2)
+
+    # Safety clamp for very short videos
+    if end <= start:
+        start = 0.0
+        end = max(0.05, duration - frame_time)
+
+    ts = start + ((end - start) * (index / 9.0))
+
+    return f"{max(start, min(ts, end)):.4f}"
 
 def is_valid_thumbnail(video_mtime, thumb_path):
     tp = Path(thumb_path)
@@ -510,13 +547,27 @@ def check_thumbnails():
             rp = rt_dir / f"{vp.stem}.jpg"
             if not is_valid_thumbnail(vm, rp): issues["MissingRegular"].append(vp)
             
-            missing_edit_indices = []
+            valid_indices = set()
+
             if et_dir.exists():
-                for i in range(1, 11):
-                    ep = et_dir / f"{vp.stem}_{i}.jpg"
-                    if not is_valid_thumbnail(vm, ep): missing_edit_indices.append(i)
-            else:
-                missing_edit_indices = list(range(1, 11))
+                for thumb in et_dir.glob(f"{vp.stem}_*.jpg"):
+                    m = re.match(
+                        rf'^{re.escape(vp.stem)}_(\d+)\.jpg$',
+                        thumb.name
+                    )
+
+                    if not m:
+                        continue
+
+                    idx = int(m.group(1))
+
+                    if 1 <= idx <= 10 and is_valid_thumbnail(vm, thumb):
+                        valid_indices.add(idx)
+
+            missing_edit_indices = [
+                i for i in range(1, 11)
+                if i not in valid_indices
+            ]
             
             if missing_edit_indices: issues["MissingEdit"].append((vp, missing_edit_indices))
 
@@ -543,7 +594,14 @@ def check_thumbnails():
         for t in issues["Obsolete"]: fix_commands.append(["rm", str(t)])
         
         c = len(issues["MissingRegular"]) + len(issues["MissingEdit"]) + len(issues["Obsolete"])
-        print(f"{folder.name}: {'OK' if c == 0 else f'{c} files with issues'}")
+        status = "OK"
+        if c > 0:
+            parts = []
+            if issues["MissingRegular"]: parts.append(f"{len(issues['MissingRegular'])} missing regular")
+            if issues["MissingEdit"]: parts.append(f"{len(issues['MissingEdit'])} missing edit")
+            if issues["Obsolete"]: parts.append(f"{len(issues['Obsolete'])} obsolete")
+            status = f"Issues: {', '.join(parts)}"
+        print(f"{folder.name}: {status}")
 
     handle_fix_prompt(fix_commands)
 
