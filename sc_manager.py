@@ -207,16 +207,24 @@ def run_command(cmd, timeout=180, retries=1):
                     p = Path(cmd[1])
                     if p.is_file(): p.unlink()
                 else:
-                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, text=True)
                     if res.returncode != 0:
-                        logger.error(f"Command failed (code {res.returncode}): {' '.join(cmd)}")
+                        logger.error(f"Command failed (code {res.returncode}): {shlex.join(cmd)}")
+                        if res.stderr:
+                            logger.error(f"Error output: {res.stderr.strip()}")
                         return False
             else:
-                subprocess.check_call(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+                res = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, text=True)
+                if res.returncode != 0:
+                    logger.error(f"Shell command failed (code {res.returncode}): {cmd}")
+                    if res.stderr:
+                        logger.error(f"Error output: {res.stderr.strip()}")
+                    return False
             return True
         except Exception as e:
             if attempt == retries:
-                logger.error(f"Command failed after {retries} retries: {cmd}. Error: {e}")
+                cmd_str = shlex.join(cmd) if isinstance(cmd, list) else str(cmd)
+                logger.error(f"Command failed after {retries} retries: {cmd_str}. Error: {e}")
                 return False
     return False
 
@@ -298,21 +306,22 @@ def get_md5_parallel(paths):
 def build_thumbnail_command(video_path, thumb_path, timestamp_str):
     """
     FFmpeg command optimized for speed and reliability:
-    - -noautorotate BEFORE -i
-    - -ss BEFORE -i for fast seeking
+    - Input-related flags (-noautorotate, -ss, -err_detect, etc.) MUST be BEFORE -i
     - yuvj420p for MJPEG range success
     """
     return [
         "ffmpeg", "-y", "-threads", "1", 
         "-noautorotate",
+        "-err_detect", "ignore_err",
+        "-fflags", "+genpts+igndts+discardcorrupt",
+        "-analyzeduration", "100M",
+        "-probesize", "100M",
         "-ss", str(timestamp_str),
-        "-i", str(video_path), 
-        "-err_detect", "ignore_err", "-fflags", "+genpts+igndts+discardcorrupt",
-        "-analyzeduration", "100M", "-probesize", "100M",
+        "-i", os.path.abspath(video_path),
         "-map", "0:v:0", "-an", "-vframes", "1", 
         "-vf", THUMB_FILTER,
         "-pix_fmt", "yuvj420p", "-map_metadata", "-1",
-        "-strict", "unofficial", str(thumb_path)
+        "-strict", "unofficial", os.path.abspath(thumb_path)
     ]
 
 def get_edit_thumbnail_timestamp(duration, fps, index):
