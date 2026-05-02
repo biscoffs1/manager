@@ -211,12 +211,12 @@ def run_command(cmd, timeout=180, retries=1):
                         cmd,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.PIPE,
-                        text=True,
                         timeout=timeout
                     )
                     if res.returncode != 0:
                         logger.error(f"Command failed (code {res.returncode}): {shlex.join(cmd)}")
-                        logger.error(res.stderr[-2000:])
+                        err_out = res.stderr.decode('utf-8', errors='replace')
+                        logger.error(err_out[-2000:])
                         return False
             else:
                 res = subprocess.run(
@@ -224,12 +224,12 @@ def run_command(cmd, timeout=180, retries=1):
                     shell=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
-                    text=True,
                     timeout=timeout
                 )
                 if res.returncode != 0:
                     logger.error(f"Shell command failed (code {res.returncode}): {cmd}")
-                    logger.error(res.stderr[-2000:])
+                    err_out = res.stderr.decode('utf-8', errors='replace')
+                    logger.error(err_out[-2000:])
                     return False
             return True
         except Exception as e:
@@ -271,8 +271,8 @@ def get_video_metadata(video_path, use_cache=None):
             "-show_entries", "format=duration:stream=avg_frame_rate",
             "-of", "json", str(video_path)
         ]
-        res = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=10)
-        data = json.loads(res)
+        res = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10)
+        data = json.loads(res.decode('utf-8', errors='replace'))
         if 'streams' in data and data['streams']:
             fps_str = data['streams'][0].get('avg_frame_rate', '25/1')
             if "/" in fps_str:
