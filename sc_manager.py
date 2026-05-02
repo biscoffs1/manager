@@ -326,13 +326,26 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
 
 def get_edit_thumbnail_timestamp(duration, fps, index):
     if duration <= 0: duration = 10.0
-    margin = max(0.5, duration * 0.05)
+    if fps <= 0: fps = 25.0
+
+    # User request: 2 frames in from start, 2 frames from end.
+    margin = 2.0 / fps
     if margin * 2 >= duration:
-        s, e = 0, duration * 0.95
+        # Fallback for very short videos: 5% margin
+        margin = duration * 0.05
+
+    s = margin
+    e = duration - margin
+
+    # 10 frames means index 0 to 9.
+    if index == 0:
+        ts = s
+    elif index == 9:
+        ts = e
     else:
-        s, e = margin, duration - margin
-    ts = s + (index * (e - s) / 9)
-    return f"{max(0.0, min(ts, duration - 0.05)):.4f}"
+        ts = s + (index * (e - s) / 9.0)
+
+    return f"{max(0.0, min(ts, duration - 0.001)):.4f}"
 
 def is_valid_thumbnail(video_mtime, thumb_path):
     tp = Path(thumb_path)
@@ -552,7 +565,14 @@ def check_thumbnails():
         for t in issues["Obsolete"]: fix_commands.append(["rm", str(t)])
         
         c = len(issues["MissingRegular"]) + len(issues["MissingEdit"]) + len(issues["Obsolete"])
-        print(f"{folder.name}: {'OK' if c == 0 else f'{c} files with issues'}")
+        status = "OK"
+        if c > 0:
+            parts = []
+            if issues["MissingRegular"]: parts.append(f"{len(issues['MissingRegular'])} missing regular")
+            if issues["MissingEdit"]: parts.append(f"{len(issues['MissingEdit'])} missing edit")
+            if issues["Obsolete"]: parts.append(f"{len(issues['Obsolete'])} obsolete")
+            status = f"Issues: {', '.join(parts)}"
+        print(f"{folder.name}: {status}")
 
     handle_fix_prompt(fix_commands)
 
