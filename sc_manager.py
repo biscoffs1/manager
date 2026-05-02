@@ -215,28 +215,8 @@ def run_command(cmd, timeout=180, retries=1):
                         timeout=timeout
                     )
                     if res.returncode != 0:
-                        err_out = res.stderr[-2000:]
-                        if "Invalid color space" in err_out:
-                            # Fallback strategy: retry with legacy format if possible
-                            try:
-                                vf_idx = cmd.index("-vf")
-                                new_cmd = cmd.copy()
-                                new_cmd[vf_idx + 1] = new_cmd[vf_idx + 1].replace("format=yuv420p", "format=yuvj420p")
-                                res_fallback = subprocess.run(
-                                    new_cmd,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE,
-                                    text=True,
-                                    timeout=timeout
-                                )
-                                if res_fallback.returncode == 0:
-                                    return True
-                                err_out = res_fallback.stderr[-2000:]
-                            except (ValueError, IndexError):
-                                pass
-
                         logger.error(f"Command failed (code {res.returncode}): {shlex.join(cmd)}")
-                        logger.error(err_out)
+                        logger.error(res.stderr[-2000:])
                         return False
             else:
                 res = subprocess.run(
@@ -338,21 +318,19 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
     """
     FFmpeg command optimized for speed and reliability:
     - Input-related flags (-noautorotate, -ss, -err_detect, etc.) MUST be BEFORE -i
-    - yuv420p via filter for compatibility
+    - yuvj420p for MJPEG compatibility
     """
     return [
         "ffmpeg", "-y", "-threads", "1", 
         "-noautorotate",
         "-err_detect", "ignore_err",
         "-fflags", "+genpts+igndts+discardcorrupt",
-        "-analyzeduration", "100M",
-        "-probesize", "100M",
         "-ss", str(timestamp_str),
         "-i", os.path.abspath(video_path),
         "-map", "0:v:0", "-an", "-vframes", "1", 
-        "-vf", f"{THUMB_FILTER},scale=in_range=full:out_range=tv,format=yuv420p",
-        "-map_metadata", "-1",
-        "-strict", "unofficial", os.path.abspath(thumb_path)
+        "-vf", THUMB_FILTER,
+        "-pix_fmt", "yuvj420p", "-map_metadata", "-1",
+        os.path.abspath(thumb_path)
     ]
 
 def get_edit_thumbnail_timestamp(duration, fps, index):
