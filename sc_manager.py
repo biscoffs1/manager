@@ -318,8 +318,13 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
     """
     FFmpeg command optimized for speed and reliability:
     - Input-related flags (-noautorotate, -ss, -err_detect, etc.) MUST be BEFORE -i
+    - setparams filter used to normalize colorspace for FFmpeg 7+ compatibility
     - yuvj420p for MJPEG compatibility
     """
+    # Normalize colorspace metadata to avoid "Invalid color space" errors in FFmpeg 7+
+    csp_fix = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+    full_filter = f"{csp_fix},{THUMB_FILTER}"
+
     return [
         "ffmpeg", "-y", "-threads", "1", 
         "-noautorotate",
@@ -328,7 +333,7 @@ def build_thumbnail_command(video_path, thumb_path, timestamp_str):
         "-ss", str(timestamp_str),
         "-i", os.path.abspath(video_path),
         "-map", "0:v:0", "-an", "-vframes", "1", 
-        "-vf", THUMB_FILTER,
+        "-vf", full_filter,
         "-pix_fmt", "yuvj420p", "-map_metadata", "-1",
         os.path.abspath(thumb_path)
     ]
